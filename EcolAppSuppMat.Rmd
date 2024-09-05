@@ -1,0 +1,974 @@
+---
+title: "To breed or not to breed: territory occupancy is predicted by reproductive performance and habitat heterogeneity"
+author: "Andrés López-Peinado, Navinder J. Singh, Vicente Urios & Pascual López-López"
+corresponding: "andres.lopez.peinado@slu.se"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Install packages
+
+```{r}
+library(ade4)
+library(adegenet)
+library(adegraphics)
+library(broom)
+library(corrplot)
+library(dplyr)
+library(factoextra)
+library(FactoMineR)
+library(folio)
+library(geosphere)
+library(ggplot2)
+library(ggpubr)
+library(Hmisc)
+library(MASS)
+library(mda)
+library(osmdata)
+library(raster)
+library(rasterVis)
+library(reshape2)
+library(rgeos)
+library(sf)
+library(sjPlot)
+library(tabula)
+library(tidyverse)
+library(vegan)
+
+```
+
+# Read the territories information df and prepare the coordinates system 
+
+```{r}
+terr<-read.delim("territiritorieshr.csv",h=T,sep=";",dec=",")
+str(terr)
+summary(terr)
+# 25830
+terrSp<-SpatialPointsDataFrame(terr[,c("utm_x","utm_y")],proj4string=crs("+init=epsg:25830"),data=terr)
+terrSpTM<-spTransform(terrSp,crs(castellonTM))
+terrSpTM
+```
+
+
+# Prepare Corine Land Cover data and crop it by a polygon that includes all the territories
+
+```{r}
+yr2000<-raster("2000.tif")
+yr2006<-raster("2006.tif")
+yr2012<-raster("2012.tif")
+yr2018<-raster("2018.tif")
+
+mystack<-stack(yr2000,yr2006,yr2012,yr2018)
+mystack
+
+castellon<-shapefile("castellon.shp")
+castellon_t<-tidy(castellon)
+castellonTM<-spTransform(castellon,crs("+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m +no_defs"))
+cast.stack<-crop(mystack,castellonTM)
+
+levelplot(cast.stack)
+```
+
+
+# Extract Corine Land Cover data, reshape df and compare final vs original landscape composition
+
+```{r}
+
+terrSpTM
+cent_vals <- raster::extract(cast.stack,          
+	terrSpTM,   byid=TRUE, id=code, 
+	buffer = 5000,    
+	df=TRUE)         
+
+cent_vals
+cent_vals_df3<-as.data.frame(cent_vals[,c(1:5)],levels(as.factor(terr$code)))
+cent_vals_df3
+
+cent_vals_df2<-cbind(cent_vals_df[1], stack(cent_vals_df[2:5]))
+cent_vals_df2.t<-subset(cent_vals_df2,ID %in% c(1:4))
+levels(as.factor(cent_vals_df2.t$ID))
+
+cent_vals_df3<-cent_vals_df2%>%
+  group_by(ID,ind,values)%>%
+  summarise(total_count=n())%>%
+  as.data.frame
+
+cent_vals_df4<-subset(cent_vals_df3,ind %in% c("X2000","X2018"))
+cent_vals_df4
+
+cent_vals_df5<-reshape(cent_vals_df4, idvar = c("ID","values"), timevar = "ind", direction = "wide")
+head(cent_vals_df5)
+
+cent_vals_df5[is.na(cent_vals_df5)] <- 0
+cent_vals_df5$diff<-cent_vals_df5$total_count.X2018 - cent_vals_df5$total_count.X2000
+
+# Difference plot 2018-2000
+ggplot(cent_vals_df5,aes(values,diff,fill = diff < 0))+
+  geom_bar(stat="identity",position="dodge2")+
+  theme_bw()+
+  scale_fill_manual(guide = FALSE, breaks = c(TRUE, FALSE), values=c("red", "green"))+
+  facet_wrap(~ID)+
+  coord_flip()
+
+write.csv(cent_vals_df5,"cent_vals_df5.csv")
+
+nameclass<-read.csv("legendeaglecodes.csv",h=T,sep=";")
+cent_vals_df5$values<-as.factor(cent_vals_df5$values)
+nameclass$GRID_CODE<-as.factor(nameclass$GRID_CODE)
+nameclass<-nameclass[,c(1,6)]
+cent_vals_df6<-merge(cent_vals_df5,nameclass,by.x="values",by.y="GRID_CODE")
+
+write.csv(cent_vals_df6,"cent_vals_df6.csv")
+
+```
+
+#Link territorial breeding monitoring data with landscape composition data
+
+```{r}
+territoryID<-terrSpTM@data$code
+ID<-c(1:35)
+codes<-data.frame(territoryID,ID)
+
+df7<-merge(cent_vals_df6,codes,by="ID",all.x=T)
+
+abandoned<-read.csv2("/rute/territ_full.csv")
+
+df8<-merge(df7,abandoned,by.x="territoryID",by.y="code")
+
+write.csv(df8,"df8_abandoned_clc.csv")
+
+ggplot(data=df8,aes(LABEL3,diff,fill = diff < 0))+
+  geom_bar(stat="identity",position="dodge2")+
+  theme_bw()+
+  scale_fill_manual(guide = FALSE, breaks = c(TRUE, FALSE), values=c("red", "green"))+
+  facet_wrap(~abandoned)+
+  coord_flip()
+
+```
+
+#Agreggate territories by last occupancy perid group
+#2006
+
+```{r}
+
+period0006<-subset(cent_vals_df3,ind %in% c("X2000","X2006"))
+period0006
+
+period0006_df5<-reshape(period0006, idvar = c("ID","values"), timevar = "ind", direction = "wide")
+head(period0006_df5)
+
+period0006_df5[is.na(period0006_df5)] <- 0
+period0006_df5$diff0006<-period0006_df5$total_count.X2006 - period0006_df5$total_count.X2000
+
+df0006<-period0006_df5[,c(1,2,5)]
+
+```
+
+#2012
+
+```{r}
+
+period0612<-subset(cent_vals_df3,ind %in% c("X2006","X2012"))
+period0612
+
+period0612_df5<-reshape(period0612, idvar = c("ID","values"), timevar = "ind", direction = "wide")
+head(period0612_df5)
+
+period0612_df5[is.na(period0612_df5)] <- 0
+period0612_df5$diff0612<-period0612_df5$total_count.X2012 - period0612_df5$total_count.X2006
+
+df0612<-period0612_df5[,c(1,2,5)]
+head(period0612_df5)
+
+```
+
+
+#2018
+
+```{r}
+
+period1218<-subset(cent_vals_df3,ind %in% c("X2012","X2018"))
+period1218
+
+period1218_df5<-reshape(period1218, idvar = c("ID","values"), timevar = "ind", direction = "wide")
+head(period1218_df5)
+
+period1218_df5[is.na(period1218_df5)] <- 0
+period1218_df5$diff1218<-period1218_df5$total_count.X2018 - period1218_df5$total_count.X2012
+
+df1218<-period1218_df5[,c(1,2,5)]
+head(df1218)
+
+```
+
+#Merge all the grouped data in a final df
+
+```{r}
+df0006$values<-as.factor(df0006$values)
+df9<-merge(df8,df0006,by=c("ID","values"), all.x=T)
+head(df9)
+df0612$values<-as.factor(df0612$values)
+df10<-merge(df9,df0612,by=c("ID","values"), all.x=T)
+head(df10)
+df10$diff0612[is.na(df10$diff0612)] <- 0
+df11<-merge(df10,df1218,by=c("ID","values"), all.x=T)
+head(df11)
+df11$diff1218[is.na(df11$diff1218)] <- 0
+
+write.csv2(df11,"df11_abandoned_clc_dif.csv")
+
+```
+
+# Check which codes show no differences and eliminate them to reduce computational work
+# Calculate difference values for all the periods and prepare the working df (p_wdf) and the data for the PCA
+
+
+```{r}
+
+delete<-c(5,10,14,22,27,34,35,36,38,39,40,42,43)
+
+allyears_df5<-reshape(cent_vals_df3, idvar = c("ID","values"), timevar = "ind", direction = "wide")
+head(allyears_df5)
+
+allyears_df5[is.na(allyears_df5)] <- 0
+allyears_df5$diff_st<-allyears_df5$total_count.X2006 - allyears_df5$total_count.X2000
+allyears_df5$diff_nd<-allyears_df5$total_count.X2012 - allyears_df5$total_count.X2006
+allyears_df5$diff_rd<-allyears_df5$total_count.X2018 - allyears_df5$total_count.X2012
+allyears_df5$diff<-allyears_df5$total_count.X2018 - allyears_df5$total_count.X2000
+
+
+territoryID<-terrSpTM@data$code
+ID<-c(1:35)
+codes<-data.frame(territoryID,ID)
+
+allyears_df6<-merge(allyears_df5,codes,by="ID",all.x=T)
+
+abandoned<-read.csv2("rute/territ_full.csv")
+abandoned<-abandoned[,c(2:42)]
+allyears_df7<-merge(allyears_df6,abandoned,by.x="territoryID",by.y="code")
+colnames(allyears_df7)
+w_df1<-allyears_df7[,c(1,3:11,13:14,17:27)]
+colnames(w_df1)<-c("code","clc","count00","count06","count12","count18","diff_st",
+                   "diff_nd","diff_rd","diff_abs","utm_x","utm_y","attempts_full",
+                   "X0_full","X1_full","X2_full","rt0_full","rt1_full","rt2_full",
+                   "avg_full","desvest_full","CV_full","prod_full")
+
+periods<-read.csv2("rute/periods.csv")
+colnames(periods)
+periods<-periods[,c(1:20)]
+colnames(periods)<-c("code","period","yr1","yr2","yr3","yr4","yr5","yr6","abandoned",
+                     "attempts","X0","X1","X2","rt0","rt1","rt2","avg","desvest",
+                     "CV","prod")
+
+w_df2<-merge(w_df1,periods,by="code",all.x=T)
+
+
+p1_wdf<-subset(w_df2,period==1)
+colnames(p1_wdf)[3]<-"count_bf"
+p1_wdf<-p1_wdf[,c(1:4,7,10:42)]
+colnames(p1_wdf)[4]<-"count_af"
+colnames(p1_wdf)[5]<-"diff"
+
+p2_wdf<-subset(w_df2,period==2)
+colnames(p2_wdf)[4]<-"count_bf"
+p2_wdf<-p2_wdf[,c(1:2,4,5,8,10:42)]
+colnames(p2_wdf)[4]<-"count_af"
+colnames(p2_wdf)[5]<-"diff"
+
+
+p3_wdf<-subset(w_df2,period==3)
+colnames(p3_wdf)[5]<-"count_bf"
+p3_wdf<-p3_wdf[,c(1:2,5,6,9:42)]
+colnames(p3_wdf)[4]<-"count_af"
+colnames(p3_wdf)[5]<-"diff"
+
+p_wdf<-rbind(p1_wdf,p2_wdf)
+p_wdf<-rbind(p_wdf,p3_wdf)
+
+colnames(p_wdf)
+
+abd_wdf<-p_wdf[,c(1,19,26)]
+abd_wdf<-unique(abd_wdf)
+
+prueba<-w_df1[1:10]
+pruebaclc<-prueba[1:6]
+
+pruebaclc2<-cbind(pruebaclc[1:2], stack(pruebaclc[3:6]))
+pruebaclc3<-reshape(pruebaclc2, idvar = c("code","ind"), timevar = "clc", direction = "wide")
+
+colnames(pruebaclc3)<-gsub(x=colnames(pruebaclc3),pattern ="values.",replacement ="clc")
+colnames(pruebaclc3)<-gsub(x=colnames(pruebaclc3),pattern ="ind",replacement ="yr")
+pruebaclc3[is.na(pruebaclc3)] <- 0
+
+pruebaclc4<-pruebaclc3 %>%
+  dplyr::group_by(code, yr) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(freq = n / sum(n))
+
+pruebaclc4<-pruebaclc3 %>% 
+  dplyr::mutate(total = rowSums(pick(where(is.numeric), -c(code,yr)))) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(across(clc1:clc37, ~ . / total))
+
+pruebaclc5<-pruebaclc4 %>% 
+ dplyr::mutate_if(is.numeric, round, digits=3)
+  
+clc_prop<-pruebaclc5[1:33]
+clc_prop$yr<-as.factor(clc_prop$yr)
+
+clc_prop$yr <- recode_factor(clc_prop$yr, count00 = "0", count06 = "1",
+                             count12="2",count18="3")
+colnames(clc_prop)[2]<-"period"
+
+code<-unique(clc_prop$code)
+period<-c(0)
+abd<-c(0)
+
+melt<-data.frame(code,period,abd)
+colnames(melt)<-colnames(abd_wdf)
+head(melt)
+abd_wdf<-rbind(abd_wdf,melt)
+
+clc3use<-pruebaclc3
+clc3use$yr<-as.factor(clc3use$yr)
+clc3use$yr <- recode_factor(clc3use$yr, count00 = "0", count06 = "1",
+                             count12="2",count18="3")
+colnames(clc3use)[2]<-"period"
+
+discr_wdf<-merge(clc3use,abd_wdf,by=c("code","period"))
+
+write.csv(discr_wdf,"discriminant_df.csv")
+
+prueba_dsc<-discr_wdf[,c(3:34)]
+
+```
+
+# PCA to reduce variables to analyze
+
+```{r}
+
+mydat<-read.csv("prueba_dsc.csv",h=T)  
+head(mydat)  
+
+names(mydat)
+myPCA<-PCA(mydat[,c(2:32)])
+myPCA$eig
+myPCA$var
+plot(myPCA)
+
+# get_eig(res.pca)
+fviz_screeplot(myPCA, addlabels = TRUE, ylim = c(0, 50))
+fviz_pca_var(myPCA, col.var = "black")
+fviz_pca_var(myPCA, col.var="contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE # Avoid text overlapping
+)
+
+# Contributions of variables to PC1
+fviz_contrib(myPCA, choice = "var", axes = 1, top = 10)
+# Contributions of variables to PC2
+fviz_contrib(myPCA, choice = "var", axes = 2, top = 10)
+
+mydat$abandoned<-as.factor(mydat$abandoned)
+ 
+##################################
+
+res2<-rcorr(as.matrix(mydat[,c(2:32)]))
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+  )
+}
+
+str(res2)
+flattenCorrMatrix(res2$r, res2$P)
+
+res <- cor(mydat[,c(2:32)])
+corrplot(res, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+res2
+corrplot(res2$r, type="upper", order="hclust", 
+         p.mat = res2$P, sig.level = 0.01, insig = "blank")
+
+##################################
+myPCA<-PCA(mydat[,c(2:32)])
+
+fviz_pca_ind(myPCA,
+             label = "none", 
+             habillage = mydat$abandoned, 
+             addEllipses = TRUE 
+)
+
+options(scipen=2)
+myPCA$var$contrib
+my.dims<-as.data.frame(myPCA$ind$coord)
+my.dims
+mydat2<-cbind(mydat,my.dims)
+names(mydat2)
+write.csv(mydat2,"mydat2.csv")
+summary(glm(abandoned~Dim.1+Dim.2+Dim.3+Dim.4+Dim.5,data=mydat2,family=binomial))
+##################################################
+myPCA$var$contrib
+
+mydat3<-mydat[,c(2,3,4,5,6,10,12,13,14,15,16,18,21,23,24,27,28,32)]
+names(mydat3)
+
+myPCA2<-PCA(mydat3,ncp = 3)
+myPCA2$eig
+myPCA2$var$contrib
+my.dims<-as.data.frame(myPCA2$ind$coord)
+my.dims
+names(mydat)
+mydat4<-cbind(mydat[,c(1,33)],mydat3,my.dims)
+names(mydat4)
+summary(glm(abandoned~clc8+clc18+scale(clc23),data=mydat4,family=binomial))
+
+write.csv(mydat2,"mydat2.csv")
+
+```
+
+# Which variables from monitoring are more informative to predict unoccupancy?
+
+```{r}
+
+abandoned_wdf<-p_wdf[,c(1,7:38)]
+abandoned_wdf2<-unique(abandoned_wdf)
+################################################################################
+
+m0<-glmer(abandoned ~ (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+m1 <- glmer(abandoned ~ CV + (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+m2 <- glmer(abandoned ~ rt0 + (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+m3 <- glmer(abandoned ~ rt1 + (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+m4 <- glmer(abandoned ~ rt2 + (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+m5 <- glmer(abandoned ~ prod + (1|code), data=abandoned_wdf, control=control.glmer, family=binomial(link="logit"))
+
+bestmodel <- model.sel(m0,m1,m2,m3,m4,m5, rank = AIC)
+bestmodel
+
+summary(m2)
+r.squaredGLMM(m2)
+plot_model(m2, type ="pred", transform = plogis, pages=1, colors = c("firebrick", "blue"))
+
+
+```
+
+
+# Calculate distance from coastline
+
+```{r}
+
+d1_sf2 <- terr %>% st_as_sf(coords = c('utm_x','utm_y')) %>% 
+st_set_crs(25830)
+
+osm_box <- getbb (place_name = "Castellon, Spain") %>%
+  opq () %>% 
+  add_osm_feature("natural", "coastline") %>% 
+  osmdata_sf() 
+
+d1_sf<-st_transform(d1_sf2,crs=4326)
+
+dist <- geosphere::dist2Line(p = st_coordinates(d1_sf), 
+                         line = 
+st_coordinates(osm_box$osm_lines)[,1:2])
+
+
+distdf <- cbind( terr %>% rename(y=utm_y,x=utm_x),dist) %>% mutate(km=distance/1000)
+
+dist<-distdf[,c(1,8)]
+colnames(dist)<-c("code","km_coast")
+
+```
+
+testamos
+
+```{r}
+################################################################################
+p_wdf3<-p_wdf
+
+boxplot(as.numeric(alt)~as.factor(ab2),data=p_wdf3)
+summary(glm(as.factor(ab2)~as.numeric(alt)*km_coast,data=p_wdf3, family = binomial))
+
+plot_model(glm(as.factor(ab2)~as.numeric(alt)*km_coast,data=p_wdf3, family = binomial),
+           type ="pred", transform = plogis, pages=1,
+           terms = c("alt", "km_coast"))
+
+ggplot()+
+  geom_point(data=p_wdf3,aes(x=utm_x,y=utm_y,color=as.factor(p2)))
+
+ggplot()+
+  geom_point(data=p_wdf3,aes(x=utm_x,y=utm_y,color=as.factor(ab2)))
+
+
+comprob<-p_wdf3[,c("code","abandoned","period","p2")]
+comprob2<-unique(comprob)
+comprob3<-subset(comprob2,comprob2$abandoned==1)
+
+```
+
+# Put all the data together and include for each period the difference from origin too (ab_end_df)
+
+ # Lets test our hypothesis
+ # Unoccupied territories would be characterized by lower productivity, higher rate of breeding failure, lower rate at which two young were produced and higher coefficient of variation of productivity 
+ #Most continental territories (i.e., those located at higher elevation above sea level and farther from the coastline) are more likely to remain consistently unoccupied. 
+ #Habitat composition should differ between territories that are consistently occupied versus those unoccupied. In particular, more heterogeneous territories are more likely to be occupied. 
+ #Urban-dominated and intensive agricultural habitats will be avoided, and open natural areas will be preferred.
+ 
+```{r}
+
+###H1
+
+m1 <- glm(abandoned ~ rt0 , data=ab_end_df, family=binomial(link="logit"))
+
+m2 <- glm(abandoned ~ CV , data=ab_end_df, family=binomial(link="logit"))
+
+m3 <- glm(abandoned ~ rt2 , data=ab_end_df, family=binomial(link="logit"))
+
+m4 <- glm(abandoned ~ avg , data=ab_end_df, family=binomial(link="logit"))
+
+m5 <- glm(abandoned ~ rt0_full , data=ab_end_df, family=binomial(link="logit"))
+
+m6 <- glm(abandoned ~ CV_full , data=ab_end_df, family=binomial(link="logit"))
+
+m7 <- glm(abandoned ~ rt2_full , data=ab_end_df, family=binomial(link="logit"))
+
+m8 <- glm(abandoned ~ avg_full , data=ab_end_df, family=binomial(link="logit"))
+
+bestmodel <- model.sel(m1,m2,m3,m4,m5,m6,m7,m8, rank = AIC)
+bestmodel
+
+summary(m5)
+r.squaredGLMM(m5)
+plot_model(m5, type ="pred", transform = plogis, pages=1, colors = c("firebrick", "blue"))
+
+#interaction
+
+m9 <- glm(abandoned ~ rt0*CV , data=ab_end_df, family=binomial(link="logit"))
+
+m10 <- glm(abandoned ~ rt2*CV , data=ab_end_df, family=binomial(link="logit"))
+
+m11 <- glm(abandoned ~ avg*CV , data=ab_end_df, family=binomial(link="logit"))
+
+m12 <- glm(abandoned ~ rt0_full*CV_full , data=ab_end_df, family=binomial(link="logit"))
+
+m13 <- glm(abandoned ~ rt2_full*CV_full , data=ab_end_df, family=binomial(link="logit"))
+
+m14 <- glm(abandoned ~ avg_full*CV_full , data=ab_end_df, family=binomial(link="logit"))
+
+
+bestmodel <- model.sel(m1,m2,m3,m4,m5,m6,m7,m8,
+                       m9,m10,m11,m12,m13,m14, rank = AIC)
+bestmodel
+
+summary(m10)
+r.squaredGLMM(m10)
+plot_model(m10, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+a<-plot_model(m10, type ="pred", terms = c("rt2","CV"), title = "", axis.title = c("Rate of maximum brood size", "Probability of abandonment"), transform = plogis, pages=1, colors = c("#ffa500" ,"#D55E00", "darkred"))
+b<-plot_model(m10, type ="pred", terms = "CV", title = "" ,axis.title = c("Coeficient of variation", ""), transform = plogis, pages=1, colors = c("#ffa500" ,"darkred","#D55E00"))
+c<-plot_model(m10, type ="pred", terms = "rt2", title = "", axis.title = c("Rate of maximum brood size", "Probability of abandonment"), transform = plogis, pages=1, colors = c("#ffa500" ,"darkred","#D55E00"))
+
+summary(m11)
+r.squaredGLMM(m11)
+plot_model(m10, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+plot_model(m11, type ="pred", terms = c("avg","CV"), transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+summary(m9)
+r.squaredGLMM(m9)
+plot_model(m10, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+plot_model(m9, type ="pred", terms = c("rt0","CV"), transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+ set_theme(
+   base = theme_classic(), 
+   axis.linecolor = "black",     
+   axis.textcolor.y = "black", 
+   axis.tickslen = 0.2,            
+   legend.title.color = "white",   
+   legend.title.size = 2,        
+   legend.color = "black",       
+   legend.pos = "right",           
+   axis.title.size = 1.4,
+   axis.textsize = 1.2,
+   legend.size = .7,
+   geom.label.size = 3,
+   panel.gridcol.y = T,
+   panel.major.linetype = 2,
+   panel.minor.linetype = 0,
+   )
+ 
+p1<- ggarrange(c,b,ncol=2, common.legend = T,labels = c ("A","B"))
+ggarrange(p1,a,nrow=2, labels = c ("","C"))
+
+ggsave(filename="Fig2.jpg",
+       plot=last_plot(),
+       path = "rute/Plots",
+       width = 6000,
+       height = 4500,
+       units = "px",
+       device='jpeg', dpi=600, limitsize = F)
+
+###H2
+
+m1 <- glm(abandoned ~ alt , data=ab_end_df, family=binomial(link="logit"))
+
+m2 <- glm(abandoned ~ km_coast , data=ab_end_df, family=binomial(link="logit"))
+
+m3 <- glm(abandoned ~ alt*km_coast , data=ab_end_df, family=binomial(link="logit"))
+
+bestmodel <- model.sel(m1,m2,m3, rank = AIC)
+bestmodel
+
+summary(m2)
+r.squaredGLMM(m2)
+plot_model(m2, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+plot_model(m2, type ="pred", terms = "km_coast", title = "" ,axis.title = c("Distance from coastline (Km)", "Probability of abandonment"), transform = plogis, pages=1, colors = c("#ffa500" ,"darkred","#D55E00"))
+
+ggsave(filename="Fig3.jpg",
+       plot=last_plot(),
+       path = "rute/Plots",
+       width = 6000,
+       height = 4000,
+       units = "px",
+       device='jpeg', dpi=600, limitsize = F)
+
+summary(m1)
+r.squaredGLMM(m1)
+plot_model(m1, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+summary(m3)
+r.squaredGLMM(m3)
+plot_model(m3, type ="pred", terms = c("km_coast","alt"), transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+
+###H3 
+
+m1 <- glm(abandoned ~ agriculture00 + broad_leved_forest00 + coniferous_forest00 + human_food00 + open_natural_area00 +  void00 + water_bodies00, data=ab_end_df, family=binomial(link="logit"))
+
+m2 <- glm(abandoned ~ agricultureEND + broad_leved_forestEND + coniferous_forestEND + human_foodEND + open_natural_areaEND +  voidEND + water_bodiesEND , data=ab_end_df, family=binomial(link="logit"))
+
+m3 <- glm(abandoned ~ ag_diff + bl_diff + cf_diff + hf_diff + ona_diff +  v_diff + wb_diff , data=ab_end_df, family=binomial(link="logit"))
+
+m4 <- glm(abandoned ~ agricultureEND + broad_leved_forestEND + coniferous_forestEND + human_foodEND + open_natural_areaEND + salt_marshesEND + voidEND + water_bodiesEND + ag_diff + bl_diff + cf_diff + hf_diff + ona_diff + sm_diff + v_diff + wb_diff, data=ab_end_df, family=binomial(link="logit"))
+
+
+bestmodel <- model.sel(m1,m2,m3, rank = AIC)
+bestmodel
+
+summary(m2)
+r.squaredGLMM(m2)
+plot_model(m2, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+plot_model(m2, type ="pred", terms=c("agricultureEND", "broad_leved_forestEND", "coniferous_forestEND", "human_foodEND", "open_natural_areaEND", "salt_marshesEND", "voidEND", "water_bodiesEND"), transform = plogis, pages=1, colors = c("brown","lightgreen","darkgreen","orange","lightyellow","lightgrey","black","blue"))
+
+
+ab_end_df_per<-ab_end_df
+ab_end_df_per$agricultureEND<-ab_end_df_per$agricultureEND/78.54
+ab_end_df_per$broad_leved_forestEND<-ab_end_df_per$broad_leved_forestEND/78.54
+ab_end_df_per$coniferous_forestEND<-ab_end_df_per$coniferous_forestEND/78.54
+ab_end_df_per$human_foodEND<-ab_end_df_per$human_foodEND/78.54
+ab_end_df_per$open_natural_areaEND<-ab_end_df_per$open_natural_areaEND/78.54
+ab_end_df_per$salt_marshesEND<-ab_end_df_per$salt_marshesEND/78.54
+ab_end_df_per$voidEND<-ab_end_df_per$voidEND/78.54
+ab_end_df_per$water_bodiesEND<-ab_end_df_per$water_bodiesEND/78.54
+
+m2 <- glm(abandoned ~ agricultureEND + broad_leved_forestEND + coniferous_forestEND + human_foodEND + open_natural_areaEND +  voidEND + water_bodiesEND , data=ab_end_df_per, family=binomial(link="logit"))
+
+
+p1<-plot_model(m2, type ="pred", terms = "agricultureEND [all]", title = "" ,axis.title = c("Agriculture (%)", "Probability of abandonment"), transform = plogis, pages=1, colors = c("chocolate"))
+
+p2<-plot_model(m2, type ="pred", terms = "coniferous_forestEND [all]", title = "" ,axis.title = c("Coniferous forest (%)", ""), transform = plogis, pages=1, colors = c("darkgreen"))
+
+p3<-plot_model(m2, type ="pred", terms = "human_foodEND [all]", title = "" ,axis.title = c("Anthropogenic habitats (%)", ""), transform = plogis, pages=1, colors = c("lightgray"))
+
+ggarrange(p1,p2,p3,ncol=3, labels = c ("A","B","C"), font.label = list(size = 30, color = "black"))
+
+
+ggsave(filename="Fig5_2.jpg",
+       plot=last_plot(),
+       path = "rute/Plots",
+       width = 18000,
+       height = 5000,
+       units = "px",
+       device='jpeg', dpi=600, limitsize = F)
+
+
+```
+
+Diversity
+
+```{r}
+df.het00<-ab_end_df[,c(5:9,11,12)]
+df.hetEND<-ab_end_df[,c(13:17,18,19)]
+
+terhet<-ab_end_df[,1]
+#índice de riqueza
+rich00<-richness(df.het00, method = "margalef")
+richEND<-richness(df.hetEND, method = "margalef")
+#número de categorías distintas
+comp00<-composition(df.het00, method = "chao1")
+compEND<-composition(df.hetEND, method = "chao1")
+#Heterogeneidad, indice Shanon
+hetS_00<-heterogeneity(df.het00, method = "shannon")
+hetS_END<-heterogeneity(df.hetEND, method = "shannon")
+
+#Dominancia - Simpson
+domS_00<-heterogeneity(df.het00, method = "simpson")
+domS_END<-heterogeneity(df.hetEND, method = "simpson")
+dom2<-diversity(df.hetEND, "simpson")
+
+div.df<-data.frame(terhet,rich00,richEND,comp00,compEND,hetS_00,hetS_END,domS_00,
+                   domS_END)
+
+div.df<-div.df[,c(1,3,5,7,9,11,13,15,17)]
+colnames(div.df)<-c("code","rich00","richEND","comp00","compEND","hetS_00",
+                    "hetS_END","domS_00","domS_END")
+div.df$rich.diff<-div.df$richEND-div.df$rich00
+div.df$comp.diff<-div.df$compEND-div.df$comp00
+div.df$hetS.diff<-div.df$hetS_END-div.df$hetS_00
+div.df$domS.diff<-div.df$domS_END-div.df$domS_00
+
+ab_end_df2<-merge(ab_end_df,div.df,by="code")
+
+```
+
+H4
+
+```{r}
+
+###H2
+
+m1 <- glm(abandoned ~ hetS_00 , data=ab_end_df2, family=binomial(link="logit"))
+
+m2 <- glm(abandoned ~ hetS.diff , data=ab_end_df2, family=binomial(link="logit"))
+
+m3 <- glm(abandoned ~ hetS_END, data=ab_end_df2, family=binomial(link="logit"))
+
+
+bestmodel <- model.sel(m1,m2,m3, rank = AIC)
+bestmodel
+
+summary(m3)
+r.squaredGLMM(m3)
+plot_model(m1, type ="pred", transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+
+
+plot_model(m3, type ="pred", terms = "hetS_END [all]", title = "" ,axis.title = c("Shannon-Weiner’s diversity index", "Probability of abandonment"), transform = plogis, pages=1, colors = c("#ffa500" ,"darkred","#D55E00"))
+
+ggsave(filename="Fig6.jpg",
+       plot=last_plot(),
+       path = "/rute/Plots",
+       width = 6000,
+       height = 4000,
+       units = "px",
+       device='jpeg', dpi=600, limitsize = F)
+
+
+plot(ab_end_df2,x=ab_end_df2$abandoned, y=ab_end_df2$domS_END)
+
+m2 <- glm(abandoned ~ hetS_END * domS_END, data=ab_end_df2, family=binomial(link="logit"))
+
+summary(m2)
+r.squaredGLMM(m2)
+plot_model(m2, type ="pred", terms=c("hetS_END","domS_END"), transform = plogis, pages=1, colors = c("firebrick","orange" ,"blue"))
+plot_model(m2, type ="pred", transform = plogis, pages=1, colors = c("orange" ,"firebrick","blue"))
+
+```
+
+Habitat selection
+
+
+
+```{r}
+################################################################################
+gps2017_2021<-read.csv2("GPS17_21.csv") #clean eagles gps data
+
+trk <- make_track(gps2017_2021, .x=x_, .y=y_, .t=t_, id= eagle.ID, sex=sex,
+                  height.ellipsoid=height.ellipsoid,event.ID=event.ID,
+                  crs = "EPSG:4326")
+
+eagle_track <- track_resample(trk, rate = minutes(15),
+                              tolerance = minutes(1))
+
+r1 <- random_points(eagle_track)
+plot(r1)
+
+yr2018<-raster("rute/2018.tif")
+hr <- hr_mcp(eagle_track) |> hr_isopleths() |> 
+  sf::st_buffer(dist =3e4)
+hrcrop<-st_transform(hr,crs="+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m +no_defs")
+
+clc.crop<-crop(yr2018,hrcrop)
+
+clc.rp<-projectRaster(clc.crop,crs=4326)
+
+sr.clc<- terra::rast(clc.rp)
+
+summarize_sampling_rate(eagle_track)
+
+eagle_stps <- eagle_track %>% steps_by_burst(keep_cols ="start",lonlat=F)
+eagle_ssf <- eagle_stps %>% random_steps()
+eagle_ssf
+eagle_ssf_ex <- eagle_ssf %>% extract_covariates(clc.rp)
+names(eagle_ssf_ex)
+
+eagle_ssf_ex<-subset(eagle_ssf_ex,eagle_ssf_ex$X2018 <50)
+
+eagle_ssf_ex$X2018<-as.factor(round(eagle_ssf_ex$X2018))
+
+eagle_ssf_ex2<-subset(eagle_ssf_ex,eagle_ssf_ex$X2018 %in% 
+                       c(1:3,7,8,11:13,16:18,20,21,23,24,26,28,29,32,41,44))
+
+X2018<-c(1:3,7,8,11:13,16:18,20,21,23,24,26,28,29,32,41,44)
+habitat<-c("Void","Anthropized_habitats","Anthropized_habitats","Anthropized_habitats",
+           "Anthropized_habitats","Anthropized_habitats","Agriculture","Agriculture",
+           "Agriculture","Agriculture","Agriculture","Agriculture","Agriculture",
+           "Broad_leved_forest","Coniferous_forest","Open_natural_areas","Open_natural_areas",
+           "Open_natural_areas","Open_natural_areas","AAAWater_bodies","Void")
+df.mer<-data.frame(X2018,habitat)
+
+eagle_ssf_ex2<-merge(eagle_ssf_ex2,df.mer,by="X2018")
+
+eagle_ssf_ex2$habitat<-as.factor(eagle_ssf_ex2$habitat)
+m1_spatial <- fit_issf(case_ ~ habitat+
+                         log(sl_)+cos(ta_)+strata(step_id_),data = eagle_ssf_ex2,model=TRUE)
+summary(m1_spatial)
+
+mod.spat.coeff<-broom::tidy(m1_spatial$model)
+mod.spat.coeff
+
+plot_model(m1_spatial, type ="pred",
+           transform = plogis, pages=1, colors = c("orange","lightgreen","darkgreen","lightyellow","lightgrey","#062f49","orange"))
+
+
+plot_model(m1_spatial, type ="pred",
+           transform = plogis, colors = c("orange","lightgreen"))
+
+
+rsf1<-eagle_ssf_ex %>% fit_rsf(case_ ~ X2018,model=T) %>% 
+  summary()
+rsf1
+
+eagle_ssf_ex2<-subset(eagle_ssf_ex,eagle_ssf_ex$X2018 %in% 
+                        c(1:3,7,8,11:13,16:18,20,21,23,24,26,28,29,32,41,44))
+
+X2018<-c(1:3,7,8,11:13,16:18,20,21,23,24,26,28,29,32,41,44)
+habitat<-c("Void","Anthropized_habitats","Anthropized_habitats","Anthropized_habitats",
+           "Anthropized_habitats","Anthropized_habitats","Agriculture","Agriculture",
+           "Agriculture","Agriculture","Agriculture","Agriculture","Agriculture",
+           "Broad_leved_forest","Coniferous_forest","Open_natural_areas","Open_natural_areas",
+           "Open_natural_areas","Open_natural_areas","Water_bodies","Void")
+df.mer<-data.frame(X2018,habitat)
+
+eagle_ssf_ex3<-merge(eagle_ssf_ex2,df.mer,by="X2018")
+eagle_ssf_ex3$habitat<-as.factor(eagle_ssf_ex3$habitat)
+
+
+m2_spatial <- fit_issf(case_ ~ habitat+
+                         log(sl_)+cos(ta_)+strata(step_id_),data = eagle_ssf_ex3,model=TRUE)
+summary(m2_spatial)
+
+x3_lc_day<-data.frame(habitat = factor(c("Agriculture",
+                                         "Anthropized_habitats", "Broad_leved_forest",
+                                         "Coniferous_forest", "Open_natural_areas",
+                                         "Void","Water_bodies"), 
+                                       levels=c("Agriculture",
+                                                "Anthropized_habitats", "Broad_leved_forest",
+                                                "Coniferous_forest", "Open_natural_areas",
+                                                "Void","Water_bodies")),
+                      sl_=100, 'log(sl_)'=log(100),ta_=0, 'cos(ta_)'= 1) %>% 
+  mutate('Anthropized_habitats' = as.numeric(habitat == "Anthropized_habitats"),
+         'Broad_leved_forest'=as.numeric(habitat=="Broad_leved_forest"), 
+         'Coniferous_forest'  = as.numeric(habitat == "Coniferous_forest"),
+         'Open_natural_areas'=as.numeric(habitat=="Open_natural_areas"), 
+         Void = as.numeric(habitat == "Void"),
+         'Water_bodies'=as.numeric(habitat=="Water_bodies"))
+
+x4_lc_day<-data.frame(habitat = factor("Agriculture", 
+                                       levels=c("Agriculture",
+                                                "Anthropized_habitats", "Broad_leved_forest",
+                                                "Coniferous_forest", "Open_natural_areas",
+                                                "Void","Water_bodies")),
+                      sl_=100, 'log(sl_)'=log(100),ta_=0, 'cos(ta_)'= 1) %>% 
+  mutate('Anthropized_habitats' = as.numeric(habitat == "Anthropized_habitats"),
+         'Broad_leved_forest'=as.numeric(habitat=="Broad_leved_forest"), 
+         'Coniferous_forest'  = as.numeric(habitat == "Coniferous_forest"),
+         'Open_natural_areas'=as.numeric(habitat=="Open_natural_areas"), 
+         Void = as.numeric(habitat == "Void"),
+         'Water_bodies'=as.numeric(habitat=="Water_bodies"))
+
+log_rss_lc_day2<-log_rss(m2_spatial,x1=x3_lc_day,x2=x4_lc_day,ci="se")
+
+set_theme(
+  base = theme_classic(base_size = 20), 
+  axis.linecolor = "black",     
+  axis.textcolor.y = "black", 
+  axis.tickslen = 0.2,            
+  legend.title.color = "white",   
+  legend.title.size = 2,       
+  legend.color = "black",       
+  legend.pos = "right",           
+  axis.title.size = 1.4,
+  axis.textsize = 1.2,
+  legend.size = .7,
+  geom.label.size = 3,
+  panel.gridcol.y = T,
+  panel.major.linetype = 2,
+  panel.minor.linetype = 0,
+)
+
+a<-ggplot(log_rss_lc_day2$df,aes(x=habitat_x1, y=log_rss, color=habitat_x1))+
+  geom_hline(yintercept = 0, linetype="solid", color = "darkred", linewidth=1)+
+  geom_point(size=6.5,position=position_dodge(0.25))+
+  geom_errorbar(aes(ymin=lwr,ymax=upr), size=1.4,
+                position=position_dodge(0.25), width = 0.1)+
+  scale_color_manual(name= "Habitat",
+                     breaks = c("Agriculture",
+                                "Anthropized_habitats", "Broad_leved_forest",
+                                "Coniferous_forest", "Open_natural_areas",
+                                "Void","Water_bodies"),
+                     values=c("chocolate","lightgrey","lightgreen","darkgreen","orange","black","#062f49"))+
+  scale_x_discrete(labels = c("Agriculture",
+                              "Anthropized\nhabitats", "Broad-leved\nforest",
+                              "Coniferous\nforest", "Open natural\nareas",
+                              "Unsuitable\nhabitats","Water\nbodies"))+
+  xlab("Habitat classes")+ ylab("log_rss")+
+  theme(legend.position = "none")
+
+
+ggsave(filename="HabSel.jpg",
+       plot=a,
+       path = "rute/Plots",
+       width = 16000,
+       height = 7000,
+       units = "px",
+       device='jpeg', dpi=600, limitsize = F)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
